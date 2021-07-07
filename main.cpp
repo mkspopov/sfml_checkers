@@ -7,53 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-template <class C>
-class Enumerate {
-public:
-    explicit Enumerate(C& c, size_t index = 0) : c_(c), index_(index) {
-    }
-
-    Enumerate& operator++() {
-        ++index_;
-        return *this;
-    }
-
-    auto operator*() {
-        return std::tie(index_, c_.at(index_));
-    }
-
-    bool operator!=(const Enumerate& rhs) const {
-        return index_ != rhs.index_;
-    }
-
-    auto begin() { return Enumerate(c_); }
-
-    auto end() { return Enumerate(c_, c_.size()); }
-
-private:
-    C& c_;
-    size_t index_ = 0;
-};
-
-void DrawCircle() {
-    sf::RenderWindow window(sf::VideoMode(200, 200), "SFML works!");
-    sf::CircleShape shape(100.f);
-    shape.setFillColor(sf::Color::Green);
-
-    while (window.isOpen()) {
-        sf::Event event{};
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed) {
-                window.close();
-            }
-        }
-
-        window.clear();
-        window.draw(shape);
-        window.display();
-        sf::sleep(sf::seconds(0.1));
-    }
-}
+namespace color {
 
 static const auto LIGHT_GREY = sf::Color(0xD3D3D3FF);
 static const auto PEACH_PUFF = sf::Color(0xFFDAB9FF);
@@ -61,6 +15,16 @@ static const auto WHITE_SMOKE = sf::Color(0xF5F5F5FF);
 static const auto LIGHT_DIM_GREY = sf::Color(0xC0C0C0FF);
 static const auto DIM_GREY = sf::Color(0x696969FF);
 static const auto GREY = sf::Color(0x808080FF);
+static const auto SOFT_CYAN = sf::Color(0xB2F3F3FF);
+static const auto ULTRA_RED = sf::Color(0xFC6C84FF);
+static const auto BABY_BLUE = sf::Color(0x82D1F1FF);
+static const auto RAINBOW_INDIGO = sf::Color(0x1e3f66FF);
+static const auto SOFT_SEA_FOAM = sf::Color(0xDDFFEFFF);
+static const auto SOFT_YELLOW = sf::Color(0xFFFFBFFF);
+
+static const auto AVAILABLE_MOVE = SOFT_SEA_FOAM;
+
+}  // namespace color
 
 constexpr float PIECE_RADIUS = 30;
 
@@ -70,9 +34,7 @@ int ToCellId(int x, int y) {
 
 struct Piece {
     sf::CircleShape shape;
-    int id = -1;
     int cellId = -1;
-    bool isWhite = true;
     bool isQueen = false;
 };
 
@@ -108,7 +70,6 @@ public:
             auto pieceId = allPieces_.size();
             auto& piece = allPieces_.emplace_back();
             arr.emplace_back(pieceId);
-            piece.id = pieceId;
 
             piece.shape = sf::CircleShape(PIECE_RADIUS);
             piece.shape.setPosition(pos);
@@ -134,15 +95,14 @@ public:
                 position += sf::Vector2f{10, 10};
                 drawable_.emplace_back(boardSquares_.back());
                 if ((i + j) & 1) {
-                    boardSquares_.back().setFillColor(LIGHT_GREY);
+                    boardSquares_.back().setFillColor(color::LIGHT_GREY);
                     if (i < skipRowsFrom) {
-                        createPiece(blackPieces_, position, DIM_GREY, GREY);
-                        allPieces_.back().isWhite = false;
+                        createPiece(blackPieces_, position, color::DIM_GREY, color::GREY);
                     } else if (i >= skipRowsTo) {
-                        createPiece(whitePieces_, position, WHITE_SMOKE, LIGHT_DIM_GREY);
+                        createPiece(whitePieces_, position, color::WHITE_SMOKE, color::LIGHT_DIM_GREY);
                     }
                 } else {
-                    boardSquares_.back().setFillColor(PEACH_PUFF);
+                    boardSquares_.back().setFillColor(color::PEACH_PUFF);
                     board_.at(cellId) = -2;
                 }
             }
@@ -177,24 +137,36 @@ protected:
 
         CalcJumps(pieces);
         if (availablePieces_.empty()) {
-            CalcAvailableSpaces(pieces);
+            for (int pieceId : pieces) {
+                CalcAvailableSpaces(pieceId);
+            }
         }
         if (availablePieces_.empty()) {
             throw std::runtime_error("Lost!");
         }
     }
 
-    void CalcAvailableSpaces(std::vector<int>& pieces) {
-        for (const auto& piece : pieces) {
-            auto dirs = FORWARD;
-            if (!whitesTurn_) {
-                dirs = BACKWARD;
-            }
-            for (int dir : dirs) {
-                int to = allPieces_.at(piece).cellId + dir;
+    void CalcAvailableSpaces(int pieceId) {
+        auto dirs = FORWARD;
+        if (!whitesTurn_) {
+            dirs = BACKWARD;
+        }
+        auto& piece = allPieces_.at(pieceId);
+        if (piece.isQueen) {
+            dirs = BOTH_DIRS;
+        }
+        int maxSteps = 1;
+        if (piece.isQueen) {
+            maxSteps = std::max(numRows_, numCols_);
+        }
+        for (int dir : dirs) {
+            for (int step = 1; step <= maxSteps; ++step) {
+                int to = piece.cellId + dir * step;
                 if (CanMoveTo(to)) {
-                    paths_.at(allPieces_.at(piece).cellId)->children.emplace_back(std::make_unique<PathNode>(to));
-                    availablePieces_.insert(allPieces_.at(piece).id);
+                    paths_.at(piece.cellId)->children.emplace_back(std::make_unique<PathNode>(to));
+                    availablePieces_.insert(pieceId);
+                } else {
+                    break;
                 }
             }
         }
@@ -267,7 +239,13 @@ protected:
     }
 
     void ClickPossiblePiece(int cellId) {
-        ClickHighlightedPiece(cellId);
+        for (auto& move : paths_[selectedPiece_.cellId]->children) {
+            transitions_.erase(move->cellId);
+        }
+        RemoveHighlightFromMoves();
+        selectedPiece_.cellId = cellId;
+        ShowMoves(cellId);
+        AddMovesEventTransitions(cellId);
     }
 
     void ClickHighlightedCell(int cellId) {
@@ -276,7 +254,8 @@ protected:
         RemoveHighlightFromMoves();
         MakeMove(cellId);
         if (mustJumpFrom_ != -1) {
-            ClickPossiblePiece(mustJumpFrom_);
+            ShowMoves(mustJumpFrom_);
+            AddMovesEventTransitions(mustJumpFrom_);
         } else {
             ChangePlayer();
             Turn();
@@ -288,9 +267,15 @@ protected:
     }
 
     void ClickHighlightedPiece(int cellId) {
-        selectedPiece_.cellId = cellId;
-        ShowMoves(cellId);
-        AddMovesEventTransitions(cellId);
+        if (selectedPiece_.cellId != cellId) {
+            if (selectedPiece_.cellId != -1) {
+                ClickPossiblePiece(cellId);
+            } else {
+                selectedPiece_.cellId = cellId;
+                ShowMoves(cellId);
+                AddMovesEventTransitions(cellId);
+            }
+        }
     }
 
     void MakeMove(int to) {
@@ -309,27 +294,46 @@ protected:
             if (!move->isEmptyCell) {
                 for (auto& jump : move->children) {
                     if (jump->cellId == to) {
+                        eaten_.insert(move->cellId);
                         RemovePiece(move->cellId);
                         node = std::move(jump);
                         break;
                     }
                 }
             } else {
-                boardSquares_.at(move->cellId).setFillColor(LIGHT_GREY);
+                boardSquares_.at(move->cellId).setFillColor(color::LIGHT_GREY);
                 if (move->cellId == to) {
                     node = std::move(move);
                     break;
                 }
             }
         }
+
         assert(paths_.at(to)->children.empty());
         paths_.at(to)->children = std::move(node->children);
-
         paths_.at(from)->children.clear();
+
+        auto& piece = allPieces_[pieceId];
+        if ((whitesTurn_ && to / numCols_ == 0) || (!whitesTurn_ && to / numCols_ == numRows_ - 1)) {
+            if (!piece.isQueen) {
+                piece.isQueen = true;
+                if (whitesTurn_) {
+                    piece.shape.setFillColor(color::SOFT_YELLOW);
+                } else {
+                    piece.shape.setFillColor(color::RAINBOW_INDIGO);
+                }
+
+                if (mustJumpFrom_ != -1) {
+                    paths_.at(to)->children.clear();
+                    CalcJumps(paths_.at(to), eaten_, std::max(numRows_, numCols_), 0);
+                }
+            }
+        }
 
         if (paths_.at(to)->children.empty()) {
             mustJumpFrom_ = -1;
             selectedPiece_.cellId = -1;
+            eaten_.clear();
         } else {
             mustJumpFrom_ = to;
             selectedPiece_.cellId = to;
@@ -346,12 +350,13 @@ protected:
         } else {
             whitePieces_.push_back(pieceId);
         }
+        assert(pieceId >= 0);
         board_.at(to) = pieceId;
 
         allPieces_.at(pieceId).cellId = to;
     }
 
-    sf::Vector2f GetPositionVector2(int cellId) {
+    sf::Vector2f GetPositionVector2(int cellId) const {
         float row = cellId / numCols_;
         float col = cellId % numCols_;
         return {col * 80 + 10, row * 80 + 10};
@@ -377,17 +382,17 @@ protected:
         for (auto& move : paths_.at(selectedPiece_.cellId)->children) {
             if (!move->isEmptyCell) {
                 for (auto& jump : move->children) {
-                    boardSquares_.at(jump->cellId).setFillColor(LIGHT_GREY);
+                    boardSquares_.at(jump->cellId).setFillColor(color::LIGHT_GREY);
                 }
             } else {
-                boardSquares_.at(move->cellId).setFillColor(LIGHT_GREY);
+                boardSquares_.at(move->cellId).setFillColor(color::LIGHT_GREY);
             }
         }
     }
 
     void RemoveHighlightFromPieces() {
         for (auto pieceId : availablePieces_) {
-            allPieces_.at(pieceId).shape.setOutlineColor(LIGHT_DIM_GREY);
+            allPieces_.at(pieceId).shape.setOutlineColor(color::LIGHT_DIM_GREY);
         }
     }
 
@@ -395,10 +400,10 @@ protected:
         for (auto& move : paths_.at(cellId)->children) {
             if (!move->isEmptyCell) {
                 for (auto& jump : move->children) {
-                    boardSquares_.at(jump->cellId).setFillColor(sf::Color::Cyan);
+                    boardSquares_.at(jump->cellId).setFillColor(color::AVAILABLE_MOVE);
                 }
             } else {
-                boardSquares_.at(move->cellId).setFillColor(sf::Color::Cyan);
+                boardSquares_.at(move->cellId).setFillColor(color::AVAILABLE_MOVE);
             }
         }
     }
@@ -477,66 +482,12 @@ protected:
     std::vector<int> board_;
     bool whitesTurn_ = true;
     int mustJumpFrom_ = -1;
+    std::unordered_set<int> eaten_;
     std::vector<std::unique_ptr<PathNode>> paths_;
     std::unordered_set<int> availablePieces_;
-//    std::vector<int> availableMoves_;
     Piece selectedPiece_;
     using ClickHandler = std::function<void(int cellId)>;
     std::unordered_map<int, ClickHandler> transitions_;
-};
-
-class State {
-public:
-    explicit State(GameManager& game) : game_(game) {
-    }
-
-    virtual void Process(const sf::Event& event) = 0;
-
-private:
-    GameManager& game_;
-};
-
-class WaitPieceClick : public State {
-public:
-    explicit WaitPieceClick(GameManager& game) : State(game) {
-    }
-
-    virtual void Process() const {
-
-    }
-
-private:
-
-};
-
-class WaitCellClick : public State {
-public:
-    explicit WaitCellClick(GameManager& game) : State(game) {
-    }
-
-    virtual void Process() const {
-
-    }
-};
-
-class NeedJump : public State {
-public:
-    explicit NeedJump(GameManager& game) : State(game) {
-    }
-
-    virtual void Process() const {
-
-    }
-};
-
-class EndTurn : public State {
-public:
-    explicit EndTurn(GameManager& game) : State(game) {
-    }
-
-    virtual void Process() const {
-
-    }
 };
 
 int main() {
