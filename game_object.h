@@ -1,37 +1,44 @@
 #include <iostream>
 
-class A {
-public:
-    A() {
-        std::cout << "A constructed\n";
+states:
+    game starts
+    wait player click piece
+    wait player click cell
+    needJump:
+        wait player click cell
+    next player turn
+
+    for state : stateQueue {
+        state.ProcessEvent(event);
     }
 
-    ~A() {
-        std::cout << "A destructed\n";
-    }
+    Finish produces states, calls prepare on them
+    can make preparations in constructor and just wait
 
-private:
-    int a;
-};
 
-class GameObject {
-public:
-    virtual ~GameObject() = default;
 
-private:
-    A a, b, c, d, e, f, g;
-};
 
-class Character : public virtual GameObject {
-private:
-    A a;
-};
 
-class Vehicle : public virtual GameObject {
 
-};
 
-class Strange : public Character, public Vehicle {
-private:
-    A a, b, c;
-};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
