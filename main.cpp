@@ -49,6 +49,9 @@ struct PathNode {
     bool isEmptyCell = true;
 };
 
+class GameState {
+};
+
 class GameManager {
 public:
     GameManager(size_t numRows, size_t numCols)
@@ -113,10 +116,10 @@ public:
         }
     }
 
-    void ProcessEvent(sf::Event& event) {
-        if (event.type == sf::Event::MouseButtonPressed) {
-            auto cellId = ToCellId(event.mouseButton.x, event.mouseButton.y);
-            ProcessClick(cellId);
+    void ProcessClick(int cellId) {
+        if (transitions_.contains(cellId)) {
+            auto handler = transitions_.at(cellId);
+            handler(cellId);
         }
     }
 
@@ -128,6 +131,14 @@ public:
 
     void Start() {
         Turn();
+    }
+
+    bool IsWhitesTurn() const {
+        return whitesTurn_;
+    }
+
+    std::unique_ptr<GameState> GetState() const {
+        return std::make_unique<GameState>();
     }
 
 protected:
@@ -452,13 +463,6 @@ protected:
         return whitesTurn_ ^ (board_.at(cellId) >= numBlackPieces_);
     }
 
-    void ProcessClick(int cellId) {
-        if (transitions_.contains(cellId)) {
-            auto handler = transitions_.at(cellId);
-            handler(cellId);
-        }
-    }
-
     void Turn() {
         CalculateMoves();
         HighlightPieces();
@@ -490,6 +494,95 @@ protected:
     std::unordered_map<int, ClickHandler> transitions_;
 };
 
+class Events {
+public:
+    Events(sf::Window& window) : window_(window) {
+    }
+
+    bool Poll() {
+        if (window_.pollEvent(event_)) {
+            polled_ = true;
+            if (event_.type == sf::Event::Closed) {
+                window_.close();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool WaitEvent(sf::Event& event) {
+        while (!polled_) {
+            if (!Poll()) {
+                return false;
+            }
+            sf::sleep(sf::milliseconds(30));
+        }
+        event = event_;
+        polled_ = false;
+        return true;
+    }
+
+private:
+    sf::Window& window_;
+    sf::Event event_;
+    bool polled_ = false;
+};
+
+class Player {
+public:
+    virtual ~Player() = default;
+
+    virtual int Turn(std::unique_ptr<GameState> state) = 0;
+};
+
+class Human : public Player {
+public:
+    explicit Human(Events& events) : events_(events) {
+    }
+
+    int Turn(std::unique_ptr<GameState> state) override {
+        sf::Event event{};
+        if (events_.WaitEvent(event)) {
+            return ToCellId(event.mouseButton.x, event.mouseButton.y);
+        }
+        return -1;
+    }
+
+private:
+    Events& events_;
+};
+
+class Bot : public Player {
+};
+
+class Controller {
+public:
+    Controller(GameManager& game, std::unique_ptr<Player> white, std::unique_ptr<Player> black)
+        : game_(game)
+        , whitePlayer_(std::move(white))
+        , blackPlayer_(std::move(black))
+    {
+    }
+
+    void NextMove() {
+        int cellId;
+        if (game_.IsWhitesTurn()) {
+            cellId = whitePlayer_->Turn(game_.GetState());
+        } else {
+            cellId = blackPlayer_->Turn(game_.GetState());
+        }
+        if (cellId == -1) {
+            return;
+        }
+        game_.ProcessClick(cellId);
+    }
+
+private:
+    GameManager& game_;
+    std::unique_ptr<Player> whitePlayer_;
+    std::unique_ptr<Player> blackPlayer_;
+};
+
 int main() {
     sf::ContextSettings settings;
     settings.antialiasingLevel = 16;
@@ -498,20 +591,19 @@ int main() {
     GameManager game(8, 8);
     game.InitBoard();
     game.Start();
+    Events events(window);
+    Controller controller(game, std::make_unique<Human>(events), std::make_unique<Human>(events));
 
     while (window.isOpen()) {
-        sf::Event event{};
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed) {
-                window.close();
-            } else {
-                game.ProcessEvent(event);
-            }
-        }
-
         window.clear();
         game.Render(window);
         window.display();
-        sf::sleep(sf::milliseconds(30));
+
+        if (events.Poll()) {
+            controller.NextMove();
+        } else {
+            window.close();
+        }
+//        sf::sleep(sf::milliseconds(30));
     }
 }
