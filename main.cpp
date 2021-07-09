@@ -49,9 +49,6 @@ struct PathNode {
     bool isEmptyCell = true;
 };
 
-class GameState {
-};
-
 class GameManager {
 public:
     GameManager(size_t numRows, size_t numCols)
@@ -137,8 +134,21 @@ public:
         return whitesTurn_;
     }
 
-    std::unique_ptr<GameState> GetState() const {
-        return std::make_unique<GameState>();
+    class State {
+    public:
+        explicit State(const GameManager& game) : game_(game) {
+        }
+
+        const auto& GetPaths() const {
+            return game_.paths_;
+        }
+
+    private:
+        const GameManager& game_;
+    };
+
+    std::unique_ptr<State> GetState() const {
+        return std::make_unique<State>(*this);
     }
 
 protected:
@@ -532,7 +542,7 @@ class Player {
 public:
     virtual ~Player() = default;
 
-    virtual int Turn(std::unique_ptr<GameState> state) = 0;
+    virtual int Turn(std::unique_ptr<GameManager::State> state) = 0;
 };
 
 class Human : public Player {
@@ -540,10 +550,12 @@ public:
     explicit Human(Events& events) : events_(events) {
     }
 
-    int Turn(std::unique_ptr<GameState> state) override {
+    int Turn(std::unique_ptr<GameManager::State> state) override {
         sf::Event event{};
         if (events_.WaitEvent(event)) {
-            return ToCellId(event.mouseButton.x, event.mouseButton.y);
+            if (event.type == sf::Event::MouseButtonPressed) {
+                return ToCellId(event.mouseButton.x, event.mouseButton.y);
+            }
         }
         return -1;
     }
@@ -553,6 +565,29 @@ private:
 };
 
 class Bot : public Player {
+public:
+    Bot() = default;
+
+    int Turn(std::unique_ptr<GameManager::State> state) override {
+        sf::sleep(sf::milliseconds(300));
+        static int turnFrom = -1;
+        const auto& paths = state->GetPaths();
+        for (const auto& from : paths) {
+            if (!from->children.empty()) {
+                if (turnFrom == -1) {
+                    turnFrom = from->cellId;
+                    return turnFrom;
+                }
+                turnFrom = -1;
+                const auto& child = from->children.at(0);
+                if (child->isEmptyCell) {
+                    return child->cellId;
+                }
+                return child->children.at(0)->cellId;
+            }
+        }
+        return -1;
+    }
 };
 
 class Controller {
@@ -583,6 +618,14 @@ private:
     std::unique_ptr<Player> blackPlayer_;
 };
 
+Controller PlayWithFriend(GameManager& game, Events& events) {
+    return Controller(game, std::make_unique<Human>(events), std::make_unique<Human>(events));
+}
+
+Controller PlayWithBot(GameManager& game, Events& events) {
+    return Controller(game, std::make_unique<Human>(events), std::make_unique<Bot>());
+}
+
 int main() {
     sf::ContextSettings settings;
     settings.antialiasingLevel = 16;
@@ -592,7 +635,7 @@ int main() {
     game.InitBoard();
     game.Start();
     Events events(window);
-    Controller controller(game, std::make_unique<Human>(events), std::make_unique<Human>(events));
+    auto controller = PlayWithBot(game, events);
 
     while (window.isOpen()) {
         window.clear();
@@ -601,9 +644,6 @@ int main() {
 
         if (events.Poll()) {
             controller.NextMove();
-        } else {
-            window.close();
         }
-//        sf::sleep(sf::milliseconds(30));
     }
 }
