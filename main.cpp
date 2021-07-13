@@ -1,3 +1,6 @@
+#include <mynn/matrix/matrix_utils.h>
+#include <nn/src/nn_modules/nn.h>
+
 #include <SFML/Graphics.hpp>
 
 #include <cassert>
@@ -139,8 +142,20 @@ public:
         explicit State(const GameManager& game) : game_(game) {
         }
 
+//        const auto& GetAvailablePieces() const {
+//            return game_.availablePieces_;
+//        }
+
         const auto& GetPaths() const {
             return game_.paths_;
+        }
+
+        const auto& GetBoard() const {
+            return game_.board_;
+        }
+
+        bool IsWhite(int pieceId) const {
+            return game_.IsWhite(pieceId);
         }
 
     private:
@@ -366,10 +381,10 @@ protected:
     void AddPiece(int to, int pieceId) {
         auto v = GetPositionVector2(to);
         allPieces_.at(pieceId).shape.setPosition(v);
-        if (pieceId < numBlackPieces_) {
-            blackPieces_.push_back(pieceId);
-        } else {
+        if (IsWhite(pieceId)) {
             whitePieces_.push_back(pieceId);
+        } else {
+            blackPieces_.push_back(pieceId);
         }
         assert(pieceId >= 0);
         board_.at(to) = pieceId;
@@ -390,7 +405,7 @@ protected:
 
         allPieces_.at(pieceId).cellId = -1;
         allPieces_.at(pieceId).shape.setPosition(-100, -100);
-        if (pieceId < numBlackPieces_) {
+        if (IsWhite(pieceId)) {
             std::erase(blackPieces_, pieceId);
         } else {
             std::erase(whitePieces_, pieceId);
@@ -470,7 +485,11 @@ protected:
     }
 
     bool IsEnemy(int cellId) const {
-        return whitesTurn_ ^ (board_.at(cellId) >= numBlackPieces_);
+        return whitesTurn_ ^ IsWhite(board_.at(cellId));
+    }
+
+    bool IsWhite(int pieceId) const {
+        return pieceId >= numBlackPieces_;
     }
 
     void Turn() {
@@ -564,9 +583,10 @@ private:
     Events& events_;
 };
 
-class Bot : public Player {
+class SimpleBot : public Player {
 public:
-    Bot() = default;
+    explicit SimpleBot(Events&) {
+    }
 
     int Turn(std::unique_ptr<GameManager::State> state) override {
         sf::sleep(sf::milliseconds(300));
@@ -588,6 +608,90 @@ public:
         }
         return -1;
     }
+};
+
+class AiBot : public Player {
+public:
+    explicit AiBot(Module& nn) : nn_(nn) {
+    }
+
+    int Turn(std::unique_ptr<GameManager::State> state) override {
+        if (turns_.empty()) {
+            CalcTruns(state);
+        }
+        if (turns_.empty()) {
+            return -1;
+        }
+        auto turn = turns_.front();
+        turns_.erase(turns_.begin());
+        return turn;
+    }
+
+private:
+    void CalcTruns(const std::unique_ptr<GameManager::State>& state) {
+        const auto& board = state->GetBoard();
+        std::vector<std::vector<float>> input;
+        input.reserve(board.size());
+        for (int pieceId : board) {
+            if (pieceId != -2) {
+                if (pieceId == -1) {
+                    input.push_back({1, 0, 0});
+                } else if (state->IsWhite(pieceId)) {
+                    input.push_back({0, 1, 0});
+                } else {
+                    input.push_back({0, 0, 1});
+                }
+            } else {
+                input.push_back({0, 0, 0});
+            }
+        }
+
+        std::vector<int> path;
+        double max = 0.0;
+        for (const auto& from : state->GetPaths()) {
+            LeavesTraverse(from, path, [&]() {
+                if (path.size() > 1) {
+                    auto ind = state->IsWhite(board[path.front()]) ? 1 : 2;
+                    auto after = input;
+                    after[path.front()][ind] = 0;
+                    after[path.front()][0] = 1;
+                    after[path.back()][ind] = 1;
+                    after[path.back()][0] = 0;
+
+                    for (size_t i = 1; i + 1 < path.size(); i += 2) {
+                        after[path[i]][3 - ind] = 0;
+                        after[path[i]][0] = 1;
+                    }
+                    auto matrix = CreateMatrixFromData(after);
+                    double prob = nn_.Forward(matrix)[0];
+                    if (prob > max) {
+                        max = prob;
+                        turns_ = path;
+                    }
+                }
+            });
+        }
+
+        for (size_t i = 1; i + 1 < turns_.size(); ++i) {
+            turns_.erase(turns_.begin() + i);
+        }
+    }
+
+    template <class Callback>
+    void LeavesTraverse(const std::unique_ptr<PathNode>& cur, std::vector<int>& path, Callback cb) {
+        path.push_back(cur->cellId);
+        if (cur->children.empty()) {
+            cb();
+            return;
+        }
+        for (const auto& child : cur->children) {
+            LeavesTraverse(child, path, cb);
+        }
+        path.pop_back();
+    }
+
+    std::vector<int> turns_;
+    Module& nn_;
 };
 
 class Controller {
@@ -618,15 +722,27 @@ private:
     std::unique_ptr<Player> blackPlayer_;
 };
 
-Controller PlayWithFriend(GameManager& game, Events& events) {
-    return Controller(game, std::make_unique<Human>(events), std::make_unique<Human>(events));
+template <class SecondPlayer>
+std::unique_ptr<Controller> PlayWith(GameManager& game, Events& events) {
+    return std::make_unique<Controller>(
+        game,
+        std::make_unique<Human>(events),
+        std::make_unique<SecondPlayer>(events));
 }
 
-Controller PlayWithBot(GameManager& game, Events& events) {
-    return Controller(game, std::make_unique<Human>(events), std::make_unique<Bot>());
+std::unique_ptr<Controller> PlayWith(GameManager& game, Events& events, std::unique_ptr<Player> secondPlayer) {
+    return std::make_unique<Controller>(
+        game,
+        std::make_unique<Human>(events),
+        std::move(secondPlayer));
 }
 
-int main() {
+int main(int argc, char** argv) {
+    std::string bot;
+    if (argc > 1) {
+        bot = argv[1];
+    }
+
     sf::ContextSettings settings;
     settings.antialiasingLevel = 16;
     sf::RenderWindow window(sf::VideoMode(640, 640), "SFML works!", sf::Style::Default, settings);
@@ -635,7 +751,20 @@ int main() {
     game.InitBoard();
     game.Start();
     Events events(window);
-    auto controller = PlayWithBot(game, events);
+
+    std::unique_ptr<Controller> controller;
+    if (bot == "simple") {
+        controller = PlayWith<SimpleBot>(game, events);
+    } else if (bot == "ai") {
+        Sequential nn;
+        nn
+            .AddModule(Linear(2, 2))
+            .AddModule(ReLU())
+            .AddModule(ToProbabilities());
+        controller = PlayWith(game, events, std::make_unique<AiBot>(nn));
+    } else {
+        controller = PlayWith<Human>(game, events);
+    }
 
     while (window.isOpen()) {
         window.clear();
@@ -643,7 +772,7 @@ int main() {
         window.display();
 
         if (events.Poll()) {
-            controller.NextMove();
+            controller->NextMove();
         }
     }
 }
