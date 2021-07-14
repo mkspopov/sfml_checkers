@@ -23,16 +23,4 @@ add_executable(${PROJECT_NAME} ${SOURCE_FILES} ${HEADER_FILES})
 
 find_package(SFML REQUIRED COMPONENTS graphics audio window system)
 
-find_package(mynn REQUIRED)
-
-#target_include_directories(
-#    ${PROJECT_NAME} PUBLIC
-#    /home/mkspopov/CLionProjects
-#    /home/mkspopov/CLionProjects/nn/src/matrix/
-#    /home/mkspopov/CLionProjects/nn/src/nn_modules/
-#    /home/mkspopov/CLionProjects/nn/src/utils/
-#)
-
-target_link_libraries(${PROJECT_NAME} PUBLIC mynn sfml-graphics sfml-audio sfml-window sfml-system)  # GL
-
-
+target_link_libraries(${PROJECT_NAME} PUBLIC mynn nn_modules matrix algorithms games utils sfml-graphics sfml-audio sfml-window sfml-system)  # GL

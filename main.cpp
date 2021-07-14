@@ -1,5 +1,4 @@
-#include <mynn/matrix/matrix_utils.h>
-#include <nn/src/nn_modules/nn.h>
+#include <mynn/mynn.h>
 
 #include <SFML/Graphics.hpp>
 
@@ -55,13 +54,8 @@ struct PathNode {
 class GameManager {
 public:
     GameManager(size_t numRows, size_t numCols)
-        : size_(numRows * numCols)
-        , numRows_(numRows)
-        , numCols_(numCols)
-        , numBlackPieces_(12)
-        , paths_(size_)
-        , board_(size_, -1)
-    {
+        : size_(numRows * numCols), numRows_(numRows), numCols_(numCols), numBlackPieces_(12),
+          paths_(size_), board_(size_, -1) {
         boardSquares_.reserve(size_);
         blackPieces_.reserve(12);
         whitePieces_.reserve(12);
@@ -102,7 +96,8 @@ public:
                     if (i < skipRowsFrom) {
                         createPiece(blackPieces_, position, color::DIM_GREY, color::GREY);
                     } else if (i >= skipRowsTo) {
-                        createPiece(whitePieces_, position, color::WHITE_SMOKE, color::LIGHT_DIM_GREY);
+                        createPiece(whitePieces_, position, color::WHITE_SMOKE,
+                                    color::LIGHT_DIM_GREY);
                     }
                 } else {
                     boardSquares_.back().setFillColor(color::PEACH_PUFF);
@@ -156,6 +151,10 @@ public:
 
         bool IsWhite(int pieceId) const {
             return game_.IsWhite(pieceId);
+        }
+
+        bool IsEnemy(int cellId) const {
+            return game_.IsEnemy(cellId);
         }
 
     private:
@@ -226,7 +225,8 @@ protected:
         }
     }
 
-    void CalcJumps(std::unique_ptr<PathNode>& node, std::unordered_set<int>& eaten, int maxSteps, int forbiddenDir) {
+    void CalcJumps(std::unique_ptr<PathNode>& node, std::unordered_set<int>& eaten, int maxSteps,
+                   int forbiddenDir) {
         for (int dir : BOTH_DIRS) {
             if (dir == forbiddenDir) {
                 continue;
@@ -350,7 +350,8 @@ protected:
         paths_.at(from)->children.clear();
 
         auto& piece = allPieces_[pieceId];
-        if ((whitesTurn_ && to / numCols_ == 0) || (!whitesTurn_ && to / numCols_ == numRows_ - 1)) {
+        if ((whitesTurn_ && to / numCols_ == 0) ||
+            (!whitesTurn_ && to / numCols_ == numRows_ - 1)) {
             if (!piece.isQueen) {
                 piece.isQueen = true;
                 if (whitesTurn_) {
@@ -406,9 +407,9 @@ protected:
         allPieces_.at(pieceId).cellId = -1;
         allPieces_.at(pieceId).shape.setPosition(-100, -100);
         if (IsWhite(pieceId)) {
-            std::erase(blackPieces_, pieceId);
-        } else {
             std::erase(whitePieces_, pieceId);
+        } else {
+            std::erase(blackPieces_, pieceId);
         }
 
         return pieceId;
@@ -612,7 +613,7 @@ public:
 
 class AiBot : public Player {
 public:
-    explicit AiBot(Module& nn) : nn_(nn) {
+    explicit AiBot(std::shared_ptr<Module> nn) : nn_(std::move(nn)) {
     }
 
     int Turn(std::unique_ptr<GameManager::State> state) override {
@@ -647,29 +648,33 @@ private:
         }
 
         std::vector<int> path;
-        double max = 0.0;
+        auto max = std::numeric_limits<float>::lowest();
         for (const auto& from : state->GetPaths()) {
-            LeavesTraverse(from, path, [&]() {
-                if (path.size() > 1) {
-                    auto ind = state->IsWhite(board[path.front()]) ? 1 : 2;
-                    auto after = input;
-                    after[path.front()][ind] = 0;
-                    after[path.front()][0] = 1;
-                    after[path.back()][ind] = 1;
-                    after[path.back()][0] = 0;
+            auto pieceId = board.at(from->cellId);
+            if (pieceId >= 0 && !state->IsEnemy(from->cellId)) {
+                LeavesTraverse(from, path, [&]() {
+                    if (path.size() > 1) {
+                        auto ind = state->IsWhite(board[path.front()]) ? 1 : 2;
+                        auto after = input;
+                        after[path.front()][ind] = 0;
+                        after[path.front()][0] = 1;
+                        after[path.back()][ind] = 1;
+                        after[path.back()][0] = 0;
 
-                    for (size_t i = 1; i + 1 < path.size(); i += 2) {
-                        after[path[i]][3 - ind] = 0;
-                        after[path[i]][0] = 1;
+                        for (size_t i = 1; i + 1 < path.size(); i += 2) {
+                            after[path[i]][3 - ind] = 0;
+                            after[path[i]][0] = 1;
+                        }
+                        auto matrix = CreateMatrixFromData(after);
+                        nn_->AdjustShape(matrix);
+                        float prob = nn_->Forward(matrix)[0];
+                        if (prob > max) {
+                            max = prob;
+                            turns_ = path;
+                        }
                     }
-                    auto matrix = CreateMatrixFromData(after);
-                    double prob = nn_.Forward(matrix)[0];
-                    if (prob > max) {
-                        max = prob;
-                        turns_ = path;
-                    }
-                }
-            });
+                });
+            }
         }
 
         for (size_t i = 1; i + 1 < turns_.size(); ++i) {
@@ -682,6 +687,7 @@ private:
         path.push_back(cur->cellId);
         if (cur->children.empty()) {
             cb();
+            path.pop_back();
             return;
         }
         for (const auto& child : cur->children) {
@@ -691,16 +697,13 @@ private:
     }
 
     std::vector<int> turns_;
-    Module& nn_;
+    std::shared_ptr<Module> nn_;
 };
 
 class Controller {
 public:
-    Controller(GameManager& game, std::unique_ptr<Player> white, std::unique_ptr<Player> black)
-        : game_(game)
-        , whitePlayer_(std::move(white))
-        , blackPlayer_(std::move(black))
-    {
+    Controller(GameManager& game, std::shared_ptr<Player> white, std::shared_ptr<Player> black)
+        : game_(game), whitePlayer_(std::move(white)), blackPlayer_(std::move(black)) {
     }
 
     void NextMove() {
@@ -718,8 +721,8 @@ public:
 
 private:
     GameManager& game_;
-    std::unique_ptr<Player> whitePlayer_;
-    std::unique_ptr<Player> blackPlayer_;
+    std::shared_ptr<Player> whitePlayer_;
+    std::shared_ptr<Player> blackPlayer_;
 };
 
 template <class SecondPlayer>
@@ -730,7 +733,8 @@ std::unique_ptr<Controller> PlayWith(GameManager& game, Events& events) {
         std::make_unique<SecondPlayer>(events));
 }
 
-std::unique_ptr<Controller> PlayWith(GameManager& game, Events& events, std::unique_ptr<Player> secondPlayer) {
+std::unique_ptr<Controller>
+PlayWith(GameManager& game, Events& events, std::unique_ptr<Player> secondPlayer) {
     return std::make_unique<Controller>(
         game,
         std::make_unique<Human>(events),
@@ -753,26 +757,78 @@ int main(int argc, char** argv) {
     Events events(window);
 
     std::unique_ptr<Controller> controller;
+
+    auto Run = [&]() {
+        try {
+            while (window.isOpen()) {
+                window.clear();
+                game.Render(window);
+                window.display();
+
+                if (events.Poll()) {
+                    controller->NextMove();
+                }
+            }
+        } catch (const std::runtime_error&) {
+            if (game.IsWhitesTurn()) {
+                return 1;
+            }
+            return 0;
+        }
+        return 2;
+    };
+
     if (bot == "simple") {
         controller = PlayWith<SimpleBot>(game, events);
     } else if (bot == "ai") {
-        Sequential nn;
-        nn
-            .AddModule(Linear(2, 2))
+        auto nn = std::make_unique<Sequential>();
+        (*nn)
+            .AddModule(Linear(64, 32))
             .AddModule(ReLU())
-            .AddModule(ToProbabilities());
-        controller = PlayWith(game, events, std::make_unique<AiBot>(nn));
+            .AddModule(Linear(32, 16))
+            .AddModule(ReLU())
+            .AddModule(Linear(16, 1));
+        controller = PlayWith(game, events, std::make_unique<AiBot>(std::move(nn)));
+    } else if (bot == "learn") {
+        std::vector<std::shared_ptr<Sequential>> modules(100);
+        for (auto& module : modules) {
+            module = std::make_shared<Sequential>();
+            (*module)
+                .AddModule(Linear(64, 32))
+                .AddModule(ReLU())
+                .AddModule(Linear(32, 16))
+                .AddModule(ReLU())
+                .AddModule(Linear(16, 1));
+        }
+        std::vector<int> score(100);
+        for (size_t i = 0; i < 100; ++i) {
+            for (size_t j = i + 1; j < 100; ++j) {
+                controller = std::make_unique<Controller>(
+                    game,
+                    std::make_shared<AiBot>(modules[i]),
+                    std::make_shared<AiBot>(modules[j]));
+                auto win = Run();
+                if (win == 2) {
+                    throw std::runtime_error("WFT");
+                }
+                if (win == 0) {
+                    ++score[i];
+                } else {
+                    ++score[j];
+                }
+            }
+        }
+        std::vector<int> indices(100);
+        std::iota(indices.begin(), indices.end(), 0);
+        std::sort(indices.begin(), indices.end(), [&](auto lhs, auto rhs) {
+            return score[lhs] < score[rhs];
+        });
+        auto nn = modules[indices.back()];
+        std::cerr << "Score: " << score[indices.back()] << std::endl;
+        controller = PlayWith(game, events, std::make_unique<AiBot>(std::move(nn)));
     } else {
         controller = PlayWith<Human>(game, events);
     }
 
-    while (window.isOpen()) {
-        window.clear();
-        game.Render(window);
-        window.display();
-
-        if (events.Poll()) {
-            controller->NextMove();
-        }
-    }
+    Run();
 }
