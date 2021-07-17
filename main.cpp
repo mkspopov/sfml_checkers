@@ -1,3 +1,5 @@
+#include "utils.h"
+
 #include <mynn/mynn.h>
 
 #include <SFML/Graphics.hpp>
@@ -5,37 +7,22 @@
 #include <cassert>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
 
-namespace color {
+int ToCellId(int x, int y, int numCols) {
+    return (y / 80) * numCols + x / 80;
+}
 
-static const auto LIGHT_GREY = sf::Color(0xD3D3D3FF);
-static const auto PEACH_PUFF = sf::Color(0xFFDAB9FF);
-static const auto WHITE_SMOKE = sf::Color(0xF5F5F5FF);
-static const auto LIGHT_DIM_GREY = sf::Color(0xC0C0C0FF);
-static const auto DIM_GREY = sf::Color(0x696969FF);
-static const auto GREY = sf::Color(0x808080FF);
-static const auto SOFT_CYAN = sf::Color(0xB2F3F3FF);
-static const auto ULTRA_RED = sf::Color(0xFC6C84FF);
-static const auto BABY_BLUE = sf::Color(0x82D1F1FF);
-static const auto RAINBOW_INDIGO = sf::Color(0x1e3f66FF);
-static const auto SOFT_SEA_FOAM = sf::Color(0xDDFFEFFF);
-static const auto SOFT_YELLOW = sf::Color(0xFFFFBFFF);
-
-static const auto AVAILABLE_MOVE = SOFT_SEA_FOAM;
-
-}  // namespace color
-
-constexpr float PIECE_RADIUS = 30;
-
-int ToCellId(int x, int y) {
-    return (y / 80) * 8 + x / 80;
+sf::Vector2f ToVector(int cellId, int numCols) {
+    auto row = static_cast<float>(cellId / numCols);
+    auto col = static_cast<float>(cellId % numCols);
+    return {col * 80.0F + 10.0F, row * 80.0F + 10.0F};
 }
 
 struct Piece {
-    sf::CircleShape shape;
     int cellId = -1;
     bool isQueen = false;
 };
@@ -51,64 +38,224 @@ struct PathNode {
     bool isEmptyCell = true;
 };
 
-class GameManager {
+class Renderer {
 public:
-    GameManager(size_t numRows, size_t numCols)
-        : size_(numRows * numCols), numRows_(numRows), numCols_(numCols), numBlackPieces_(12),
-          paths_(size_), board_(size_, -1) {
-        boardSquares_.reserve(size_);
-        blackPieces_.reserve(12);
-        whitePieces_.reserve(12);
-        allPieces_.reserve(whitePieces_.capacity() + blackPieces_.capacity());
+    virtual void RemoveHighlightFromPieces(const std::unordered_set<int>& availablePieces) {
     }
 
-    void InitBoard() {
-        auto createPiece = [&](auto& arr, auto pos, auto color, auto outlineColor) {
-            auto pieceId = allPieces_.size();
-            auto& piece = allPieces_.emplace_back();
-            arr.emplace_back(pieceId);
+    virtual void RemoveHighlightFromMoves(const std::unique_ptr<PathNode>& moves) {
+    }
 
-            piece.shape = sf::CircleShape(PIECE_RADIUS);
-            piece.shape.setPosition(pos);
-            piece.shape.setFillColor(color);
-            piece.shape.setOutlineColor(outlineColor);
-            piece.shape.setOutlineThickness(2.f);
+    virtual void ShowMoves(const std::unique_ptr<PathNode>& moves) {
+    }
 
-            auto cellId = ToCellId(pos.x, pos.y);
-            piece.cellId = cellId;
-            board_.at(cellId) = pieceId;
+    virtual void InitBoard(const std::string& boardFilename, const std::vector<Piece>& whitePieces,
+                           const std::vector<Piece>& blackPieces,
+                           int numRows, int numCols) {
+    }
+
+    virtual void Render() = 0;
+
+    virtual void SetWhitesQueen(int pieceId) {
+    }
+
+    virtual void SetBlacksQueen(int pieceId) {
+    }
+
+    virtual void HighlightPieces(const std::unordered_set<int>& availablePieces) {
+    }
+
+    virtual void SetPiecePosition(int pieceId, int cellId) {
+    }
+
+    virtual void ErasePiece(int pieceId) {
+    }
+};
+
+class EmptyRenderer : public Renderer {
+public:
+    EmptyRenderer() = default;
+
+    void Render() override {
+    }
+};
+
+class BoardRenderer : public Renderer {
+public:
+    explicit BoardRenderer(sf::RenderWindow& window)
+        : window_(window) {
+    }
+
+    void RemoveHighlightFromPieces(const std::unordered_set<int>& availablePieces) override {
+        for (auto pieceId : availablePieces) {
+            pieces_.at(pieceId).setOutlineColor(color::LIGHT_DIM_GREY);
+        }
+    }
+
+    void RemoveHighlightFromMoves(const std::unique_ptr<PathNode>& moves) override {
+        for (auto& move : moves->children) {
+            if (!move->isEmptyCell) {
+                for (auto& jump : move->children) {
+                    squaresToDraw_.erase(jump->cellId);
+                }
+            } else {
+                squaresToDraw_.erase(move->cellId);
+            }
+        }
+    }
+
+    void ShowMoves(const std::unique_ptr<PathNode>& moves) override {
+        for (auto& move : moves->children) {
+            if (!move->isEmptyCell) {
+                for (auto& jump : move->children) {
+                    squaresToDraw_.insert(jump->cellId);
+                }
+            } else {
+                squaresToDraw_.insert(move->cellId);
+            }
+        }
+    }
+
+    void InitBoard(const std::string& boardFilename, const std::vector<Piece>& whitePieces,
+                   const std::vector<Piece>& blackPieces,
+                   int numRows, int numCols) override {
+        numCols_ = numCols;
+        auto loaded = texture_.loadFromFile(boardFilename);
+        if (!loaded) {
+            throw std::runtime_error("cannot load from " + boardFilename);
+        }
+        Log() << "Loaded board from " << boardFilename;
+        sprite_.setTexture(texture_);
+
+        for (int i = 0; i < numRows; ++i) {
+            for (int j = 0; j < numCols; ++j) {
+                sf::Vector2f position = {j * CELL_SIZE, i * CELL_SIZE};
+                boardSquares_.emplace_back(sf::Vector2f{CELL_SIZE, CELL_SIZE});
+                boardSquares_.back().setPosition(position);
+                boardSquares_.back().setFillColor(color::AVAILABLE_MOVE);
+            }
+        }
+
+        pieces_.resize(whitePieces.size() + blackPieces.size());
+
+        auto setPiece = [&](auto& piece, auto cellId, auto color, auto outlineColor) {
+            piece = sf::CircleShape(PIECE_RADIUS);
+            piece.setPosition(ToVector(cellId, numCols_));
+            piece.setFillColor(color);
+            piece.setOutlineColor(outlineColor);
+            piece.setOutlineThickness(2.f);
         };
 
-        size_t skipRowsFrom = 3;
-        size_t skipRowsTo = 5;
-        for (size_t i = 0; i < 8; ++i) {
-            for (size_t j = 0; j < 8; ++j) {
-                auto cellId = i * 8 + j;
-                paths_.at(cellId) = std::make_unique<PathNode>(cellId);
+        for (const auto&[id, piece] : Enumerate(blackPieces)) {
+            setPiece(pieces_.at(id), piece.cellId, color::DIM_GREY, color::GREY);
+        }
 
-                sf::Vector2f position = {j * 80.f, i * 80.f};
-                boardSquares_.emplace_back(sf::Vector2f{80.0f, 80.0f});
-                boardSquares_.back().setPosition(position);
-                position += sf::Vector2f{10, 10};
-                drawable_.emplace_back(boardSquares_.back());
+        for (const auto&[id, piece] : Enumerate(whitePieces)) {
+            setPiece(pieces_.at(id + blackPieces.size()), piece.cellId, color::WHITE_SMOKE,
+                     color::LIGHT_DIM_GREY);
+        }
+    }
+
+    void Render() override {
+        window_.draw(sprite_);
+        for (auto cellId : squaresToDraw_) {
+            window_.draw(boardSquares_[cellId]);
+        }
+        for (const auto& piece : pieces_) {
+            window_.draw(piece);
+        }
+        window_.display();
+    }
+
+    void SetWhitesQueen(int pieceId) override {
+        pieces_.at(pieceId).setFillColor(color::SOFT_YELLOW);
+    }
+
+    void SetBlacksQueen(int pieceId) override {
+        pieces_.at(pieceId).setFillColor(color::RAINBOW_INDIGO);
+    }
+
+    void HighlightPieces(const std::unordered_set<int>& availablePieces) override {
+        for (auto pieceId : availablePieces) {
+            pieces_.at(pieceId).setOutlineColor(sf::Color::Green);
+        }
+    }
+
+    void SetPiecePosition(int pieceId, int cellId) override {
+        pieces_.at(pieceId).setPosition(ToVector(cellId, numCols_));
+    }
+
+    void ErasePiece(int pieceId) override {
+        pieces_.at(pieceId).setPosition(UNDEFINED_POSITION);
+    }
+
+private:
+    sf::RenderWindow& window_;
+
+    std::vector<sf::RectangleShape> boardSquares_;
+
+    sf::Sprite sprite_;
+    sf::Texture texture_;
+    std::unordered_set<int> squaresToDraw_;
+
+    std::vector<sf::CircleShape> pieces_;
+
+    int numCols_ = -1;
+};
+
+class GameManager {
+public:
+    GameManager(size_t numRows, size_t numCols, Renderer& renderer)
+        : size_(numRows * numCols), numRows_(numRows), numCols_(numCols), numBlackPieces_(12),
+          paths_(size_), board_(size_, -1), renderer_(renderer) {
+        blackPieces_.reserve(12);
+        whitePieces_.reserve(12);
+        allPieces_.reserve(24);
+    }
+
+    void InitBoard(
+        const std::string& boardFilename = "",
+        std::vector<Piece> whitePieces = {},
+        std::vector<Piece> blackPieces = {},
+        int skipRowsFrom = 3,
+        int skipRowsTo = 5) {
+        bool creatingDefaultBoard = false;
+        if (whitePieces.empty() && blackPieces.empty()) {
+            numBlackPieces_ = 12;
+            creatingDefaultBoard = true;
+        } else {
+            numBlackPieces_ = blackPieces.size();
+        }
+        for (int i = 0; i < numRows_; ++i) {
+            for (int j = 0; j < numCols_; ++j) {
+                int cellId = i * numCols_ + j;
+                paths_.at(cellId) = std::make_unique<PathNode>(cellId);
                 if ((i + j) & 1) {
-                    boardSquares_.back().setFillColor(color::LIGHT_GREY);
-                    if (i < skipRowsFrom) {
-                        createPiece(blackPieces_, position, color::DIM_GREY, color::GREY);
-                    } else if (i >= skipRowsTo) {
-                        createPiece(whitePieces_, position, color::WHITE_SMOKE,
-                                    color::LIGHT_DIM_GREY);
+                    if (creatingDefaultBoard) {
+                        if (i < skipRowsFrom) {
+                            blackPieces.push_back({cellId, false});
+                        } else if (i >= skipRowsTo) {
+                            whitePieces.push_back({cellId, false});
+                        }
                     }
                 } else {
-                    boardSquares_.back().setFillColor(color::PEACH_PUFF);
                     board_.at(cellId) = -2;
                 }
             }
         }
-
-        for (auto& piece : allPieces_) {
-            drawable_.emplace_back(piece.shape);
+        for (const auto&[id, piece] : Enumerate(blackPieces)) {
+            allPieces_.push_back(piece);
+            int pieceId = id;
+            blackPieces_.insert(pieceId);
+            board_.at(piece.cellId) = pieceId;
         }
+        for (const auto&[id, piece] : Enumerate(whitePieces)) {
+            allPieces_.push_back(piece);
+            int pieceId = id + numBlackPieces_;
+            whitePieces_.insert(pieceId);
+            board_.at(piece.cellId) = pieceId;
+        }
+        renderer_.InitBoard(boardFilename, whitePieces, blackPieces, numRows_, numCols_);
     }
 
     void ProcessClick(int cellId) {
@@ -118,11 +265,8 @@ public:
         }
     }
 
-    void Render(auto& window) {
-        for (auto& obj : drawable_) {
-            window.draw(obj);
-        }
-    }
+//    void Render(auto& window) {
+//    }
 
     void Start() {
         Turn();
@@ -136,10 +280,6 @@ public:
     public:
         explicit State(const GameManager& game) : game_(game) {
         }
-
-//        const auto& GetAvailablePieces() const {
-//            return game_.availablePieces_;
-//        }
 
         const auto& GetPaths() const {
             return game_.paths_;
@@ -155,6 +295,10 @@ public:
 
         bool IsEnemy(int cellId) const {
             return game_.IsEnemy(cellId);
+        }
+
+        int GetNumCols() const {
+            return game_.numCols_;
         }
 
     private:
@@ -211,7 +355,7 @@ protected:
         return IsValidCell(cellId) && IsEmpty(cellId);
     }
 
-    void CalcJumps(const std::vector<int>& pieces) {
+    void CalcJumps(const std::unordered_set<int>& pieces) {
         std::unordered_set<int> eaten;
         for (auto pieceId : pieces) {
             int maxSteps = 2;
@@ -278,19 +422,19 @@ protected:
         for (auto& move : paths_[selectedPiece_.cellId]->children) {
             transitions_.erase(move->cellId);
         }
-        RemoveHighlightFromMoves();
+        renderer_.RemoveHighlightFromMoves(paths_.at(selectedPiece_.cellId));
         selectedPiece_.cellId = cellId;
-        ShowMoves(cellId);
+        renderer_.ShowMoves(paths_.at(cellId));
         AddMovesEventTransitions(cellId);
     }
 
     void ClickHighlightedCell(int cellId) {
         transitions_.clear();
-        RemoveHighlightFromPieces();
-        RemoveHighlightFromMoves();
+        renderer_.RemoveHighlightFromPieces(availablePieces_);
+        renderer_.RemoveHighlightFromMoves(paths_.at(selectedPiece_.cellId));
         MakeMove(cellId);
         if (mustJumpFrom_ != -1) {
-            ShowMoves(mustJumpFrom_);
+            renderer_.ShowMoves(paths_.at(mustJumpFrom_));
             AddMovesEventTransitions(mustJumpFrom_);
         } else {
             ChangePlayer();
@@ -308,7 +452,7 @@ protected:
                 ClickPossiblePiece(cellId);
             } else {
                 selectedPiece_.cellId = cellId;
-                ShowMoves(cellId);
+                renderer_.ShowMoves(paths_.at(cellId));
                 AddMovesEventTransitions(cellId);
             }
         }
@@ -337,7 +481,6 @@ protected:
                     }
                 }
             } else {
-                boardSquares_.at(move->cellId).setFillColor(color::LIGHT_GREY);
                 if (move->cellId == to) {
                     node = std::move(move);
                     break;
@@ -355,9 +498,9 @@ protected:
             if (!piece.isQueen) {
                 piece.isQueen = true;
                 if (whitesTurn_) {
-                    piece.shape.setFillColor(color::SOFT_YELLOW);
+                    renderer_.SetWhitesQueen(pieceId);
                 } else {
-                    piece.shape.setFillColor(color::RAINBOW_INDIGO);
+                    renderer_.SetBlacksQueen(pieceId);
                 }
 
                 if (mustJumpFrom_ != -1) {
@@ -380,23 +523,16 @@ protected:
     }
 
     void AddPiece(int to, int pieceId) {
-        auto v = GetPositionVector2(to);
-        allPieces_.at(pieceId).shape.setPosition(v);
+        renderer_.SetPiecePosition(pieceId, to);
         if (IsWhite(pieceId)) {
-            whitePieces_.push_back(pieceId);
+            whitePieces_.insert(pieceId);
         } else {
-            blackPieces_.push_back(pieceId);
+            blackPieces_.insert(pieceId);
         }
         assert(pieceId >= 0);
         board_.at(to) = pieceId;
 
         allPieces_.at(pieceId).cellId = to;
-    }
-
-    sf::Vector2f GetPositionVector2(int cellId) const {
-        float row = cellId / numCols_;
-        float col = cellId % numCols_;
-        return {col * 80 + 10, row * 80 + 10};
     }
 
     int RemovePiece(int cellId) {
@@ -405,44 +541,14 @@ protected:
         board_.at(cellId) = -1;
 
         allPieces_.at(pieceId).cellId = -1;
-        allPieces_.at(pieceId).shape.setPosition(-100, -100);
+        renderer_.ErasePiece(pieceId);
         if (IsWhite(pieceId)) {
-            std::erase(whitePieces_, pieceId);
+            whitePieces_.erase(pieceId);
         } else {
-            std::erase(blackPieces_, pieceId);
+            blackPieces_.erase(pieceId);
         }
 
         return pieceId;
-    }
-
-    void RemoveHighlightFromMoves() {
-        for (auto& move : paths_.at(selectedPiece_.cellId)->children) {
-            if (!move->isEmptyCell) {
-                for (auto& jump : move->children) {
-                    boardSquares_.at(jump->cellId).setFillColor(color::LIGHT_GREY);
-                }
-            } else {
-                boardSquares_.at(move->cellId).setFillColor(color::LIGHT_GREY);
-            }
-        }
-    }
-
-    void RemoveHighlightFromPieces() {
-        for (auto pieceId : availablePieces_) {
-            allPieces_.at(pieceId).shape.setOutlineColor(color::LIGHT_DIM_GREY);
-        }
-    }
-
-    void ShowMoves(int cellId) {
-        for (auto& move : paths_.at(cellId)->children) {
-            if (!move->isEmptyCell) {
-                for (auto& jump : move->children) {
-                    boardSquares_.at(jump->cellId).setFillColor(color::AVAILABLE_MOVE);
-                }
-            } else {
-                boardSquares_.at(move->cellId).setFillColor(color::AVAILABLE_MOVE);
-            }
-        }
     }
 
     void AddMovesEventTransitions(int cellId) {
@@ -461,20 +567,11 @@ protected:
         }
     }
 
-    std::vector<int>& GetPlayerPieces() {
+    std::unordered_set<int>& GetPlayerPieces() {
         if (whitesTurn_) {
             return whitePieces_;
         }
         return blackPieces_;
-    }
-
-    void HighlightPieces() {
-        for (auto pieceId : availablePieces_) {
-            allPieces_.at(pieceId).shape.setOutlineColor(sf::Color::Green);
-            transitions_[allPieces_.at(pieceId).cellId] = [this](int cellId) {
-                ClickHighlightedPiece(cellId);
-            };
-        }
     }
 
     bool IsEmpty(int cellId) const {
@@ -495,22 +592,27 @@ protected:
 
     void Turn() {
         CalculateMoves();
-        HighlightPieces();
+        renderer_.HighlightPieces(availablePieces_);
+        for (auto pieceId : availablePieces_) {
+            transitions_[allPieces_.at(pieceId).cellId] = [this](int cellId) {
+                ClickHighlightedPiece(cellId);
+            };
+        }
     }
 
     static inline constexpr auto FORWARD = {-9, -7};
     static inline constexpr auto BACKWARD = {7, 9};
     static inline constexpr auto BOTH_DIRS = {-9, -7, 7, 9};
 
-    const size_t size_;
-    const size_t numRows_;
-    const size_t numCols_;
-    const int numBlackPieces_;
-    std::vector<sf::RectangleShape> boardSquares_;
+    const int size_;
+    const int numRows_;
+    const int numCols_;
+    int numBlackPieces_;
     std::vector<Piece> allPieces_;
-    std::vector<int> whitePieces_;
-    std::vector<int> blackPieces_;
-    std::vector<std::reference_wrapper<sf::Drawable>> drawable_;
+    std::unordered_set<int> whitePieces_;
+    std::unordered_set<int> blackPieces_;
+
+    Renderer& renderer_;
 
     // State
     std::vector<int> board_;
@@ -574,7 +676,7 @@ public:
         sf::Event event{};
         if (events_.WaitEvent(event)) {
             if (event.type == sf::Event::MouseButtonPressed) {
-                return ToCellId(event.mouseButton.x, event.mouseButton.y);
+                return ToCellId(event.mouseButton.x, event.mouseButton.y, state->GetNumCols());
             }
         }
         return -1;
@@ -710,8 +812,10 @@ public:
         int cellId;
         if (game_.IsWhitesTurn()) {
             cellId = whitePlayer_->Turn(game_.GetState());
+            Log() << "(whites," << cellId << ")";
         } else {
             cellId = blackPlayer_->Turn(game_.GetState());
+            Log() << "(blacks," << cellId << ")";
         }
         if (cellId == -1) {
             return;
@@ -741,6 +845,103 @@ PlayWith(GameManager& game, Events& events, std::unique_ptr<Player> secondPlayer
         std::move(secondPlayer));
 }
 
+class School {
+public:
+    explicit School(int numBots)
+        : numBots_(numBots)
+        , bots_(numBots_)
+        , score_(numBots_)
+        , mutexes_(numBots_)
+    {
+        for (auto& bot : bots_) {
+            bot = std::make_shared<Sequential>();
+            (*bot)
+                .AddModule(Linear(64, 32))
+                .AddModule(ReLU())
+                .AddModule(Linear(32, 16))
+                .AddModule(ReLU())
+                .AddModule(Linear(16, 1));
+        }
+    }
+
+    void Teach() {
+        ThreadPool pool(12);
+        std::atomic<int> gameInd = 0;
+        for (size_t diff = 1; diff < numBots_; ++diff) {
+            for (size_t first = 0; first + diff < numBots_; ++first) {
+                pool.AddTask([=, this, &gameInd]() {
+//                    sf::RenderWindow window(sf::VideoMode(640, 640), std::to_string(first) + " " + std::to_string(first + diff));
+//                    BoardRenderer renderer(window);
+
+                    Log() = Logger(gameInd.fetch_add(1));
+
+                    EmptyRenderer renderer;
+                    GameManager game(8, 8, renderer);
+                    game.InitBoard("board_8x8.png");
+                    game.Start();
+
+                    auto second = first + diff;
+
+                    std::unique_lock firstLock(mutexes_[first], std::defer_lock);
+                    std::unique_lock secondLock(mutexes_[second], std::defer_lock);
+                    std::lock(firstLock, secondLock);
+
+                    auto win = Play(game, Controller(
+                        game,
+                        std::make_shared<AiBot>(bots_[first]),
+                        std::make_shared<AiBot>(bots_[second])));
+
+                    if (win == 3) {
+                        throw std::runtime_error("WFT");
+                    }
+                    if (win == 0) {
+                        ++score_[first];
+                    } else {
+                        assert(win == 1);
+                        ++score_[second];
+                    }
+                    Log() << "won " << win;
+                });
+            }
+        }
+    }
+
+    auto GetBest() const {
+        std::vector<int> indices(numBots_);
+        std::iota(indices.begin(), indices.end(), 0);
+        std::sort(indices.begin(), indices.end(), [&](auto lhs, auto rhs) {
+            return score_[lhs] < score_[rhs];
+        });
+        Log() << "Score of " << indices.back() << " is " << score_[indices.back()];
+        return bots_[indices.back()];
+    }
+
+private:
+    int Play(GameManager& game, Controller controller) {
+        try {
+            while (true) {
+                controller.NextMove();
+            }
+        } catch (const std::runtime_error& e) {
+            if (e.what() != std::string("Lost!")) {
+                throw;
+            }
+            if (game.IsWhitesTurn()) {
+                return 1;
+            }
+            return 0;
+        } catch (...) {
+            return 3;
+        }
+        return 2;
+    }
+
+    const int numBots_;
+    std::vector<int> score_;
+    std::vector<std::mutex> mutexes_;
+    std::vector<std::shared_ptr<Sequential>> bots_;
+};
+
 int main(int argc, char** argv) {
     std::string bot;
     if (argc > 1) {
@@ -751,8 +952,9 @@ int main(int argc, char** argv) {
     settings.antialiasingLevel = 16;
     sf::RenderWindow window(sf::VideoMode(640, 640), "SFML works!", sf::Style::Default, settings);
 
-    GameManager game(8, 8);
-    game.InitBoard();
+    BoardRenderer renderer(window);
+    GameManager game(8, 8, renderer);
+    game.InitBoard("board_8x8.png");
     game.Start();
     Events events(window);
 
@@ -761,9 +963,7 @@ int main(int argc, char** argv) {
     auto Run = [&]() {
         try {
             while (window.isOpen()) {
-                window.clear();
-                game.Render(window);
-                window.display();
+                renderer.Render();
 
                 if (events.Poll()) {
                     controller->NextMove();
@@ -790,41 +990,10 @@ int main(int argc, char** argv) {
             .AddModule(Linear(16, 1));
         controller = PlayWith(game, events, std::make_unique<AiBot>(std::move(nn)));
     } else if (bot == "learn") {
-        std::vector<std::shared_ptr<Sequential>> modules(100);
-        for (auto& module : modules) {
-            module = std::make_shared<Sequential>();
-            (*module)
-                .AddModule(Linear(64, 32))
-                .AddModule(ReLU())
-                .AddModule(Linear(32, 16))
-                .AddModule(ReLU())
-                .AddModule(Linear(16, 1));
-        }
-        std::vector<int> score(100);
-        for (size_t i = 0; i < 100; ++i) {
-            for (size_t j = i + 1; j < 100; ++j) {
-                controller = std::make_unique<Controller>(
-                    game,
-                    std::make_shared<AiBot>(modules[i]),
-                    std::make_shared<AiBot>(modules[j]));
-                auto win = Run();
-                if (win == 2) {
-                    throw std::runtime_error("WFT");
-                }
-                if (win == 0) {
-                    ++score[i];
-                } else {
-                    ++score[j];
-                }
-            }
-        }
-        std::vector<int> indices(100);
-        std::iota(indices.begin(), indices.end(), 0);
-        std::sort(indices.begin(), indices.end(), [&](auto lhs, auto rhs) {
-            return score[lhs] < score[rhs];
-        });
-        auto nn = modules[indices.back()];
-        std::cerr << "Score: " << score[indices.back()] << std::endl;
+        const int numBots = 4;
+        School school(numBots);
+        school.Teach();
+        auto nn = school.GetBest();
         controller = PlayWith(game, events, std::make_unique<AiBot>(std::move(nn)));
     } else {
         controller = PlayWith<Human>(game, events);
@@ -832,3 +1001,5 @@ int main(int argc, char** argv) {
 
     Run();
 }
+
+#pragma clang diagnostic pop
