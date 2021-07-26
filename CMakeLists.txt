@@ -24,4 +24,4 @@ find_package(SFML REQUIRED COMPONENTS graphics audio window system)
 target_link_libraries(${PROJECT_NAME} PUBLIC mynn nn_modules matrix algorithms games utils sfml-graphics sfml-audio sfml-window sfml-system pthread)  # GL X11
 
 add_executable(draw_board draw_board.cpp utils.h)
-target_link_libraries(draw_board PUBLIC sfml-graphics sfml-audio sfml-window sfml-system)
+target_link_libraries(draw_board PUBLIC sfml-graphics sfml-audio sfml-window sfml-system pthread)

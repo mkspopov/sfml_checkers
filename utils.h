@@ -53,6 +53,7 @@ private:
     C& c_;
     size_t index_ = 0;
 };
+
 #pragma once
 
 #include <condition_variable>
@@ -238,9 +239,15 @@ void ThreadPool::WaitAll() {
 
 class Logger {
 public:
-    explicit Logger(int id = 0) : id_(id) {
+    explicit Logger(std::string id = "main", std::ostream& os = std::cerr)
+        : id_(std::move(id)), os_(&os) {
     }
-    int id_;
+
+private:
+    friend class LineLogger;
+
+    std::string id_;
+    std::ostream* os_;
 };
 
 class LineLogger {
@@ -249,15 +256,15 @@ public:
         ss << logger_.id_ << ": ";
     }
 
-    LineLogger(LineLogger&& rhs) noexcept : logger_(rhs.logger_), ss(std::move(rhs.ss)) {}
+    LineLogger(LineLogger&& rhs) noexcept: logger_(rhs.logger_), ss(std::move(rhs.ss)) {}
 
     ~LineLogger() {
         if (ss.rdbuf()->in_avail() == 0) {
             return;
         }
         ss << '\n';
-        std::cerr << ss.str();
-        std::cerr.flush();
+        (*logger_.os_) << ss.str();
+        logger_.os_->flush();
     }
 
     std::stringstream ss;
