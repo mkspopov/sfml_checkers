@@ -14,6 +14,9 @@
 #include <unordered_set>
 #include <fstream>
 
+static constexpr int INPUT_DIM = 5;
+static constexpr int INPUT_ROWS = 32;
+
 int ToCellId(int x, int y, int numCols) {
     return (y / 80) * numCols + x / 80;
 }
@@ -277,15 +280,17 @@ public:
         }
     }
 
-//    void Render(auto& window) {
-//    }
-
     void Start() {
         Turn();
     }
 
     bool IsWhitesTurn() const {
         return whitesTurn_;
+    }
+
+    bool IsLastLine(int cellId) const {
+        return (whitesTurn_ && cellId / numCols_ == 0) ||
+            (!whitesTurn_ && cellId / numCols_ == numRows_ - 1);
     }
 
     class State {
@@ -307,6 +312,14 @@ public:
 
         bool IsEnemy(int cellId) const {
             return game_.IsEnemy(cellId);
+        }
+
+        bool IsQueen(int pieceId) const {
+            return game_.allPieces_.at(pieceId).isQueen;
+        }
+
+        bool IsLastLine(int cellId) const {
+            return game_.IsLastLine(cellId);
         }
 
         int GetNumCols() const {
@@ -514,8 +527,7 @@ protected:
             turnsUntilDraw_ = TURNS_UNTIL_DRAW;
         }
 
-        if ((whitesTurn_ && to / numCols_ == 0) ||
-            (!whitesTurn_ && to / numCols_ == numRows_ - 1)) {
+        if (IsLastLine(to)) {
             if (!piece.isQueen) {
                 piece.isQueen = true;
                 if (whitesTurn_) {
@@ -771,20 +783,32 @@ public:
 
 private:
     void CalcTurns(const std::unique_ptr<GameManager::State>& state) {
+        static const std::vector<float> FREE = {1, 0, 0, 0, 0};
+        static const std::vector<float> WHITE = {0, 1, 0, 0, 0};
+        static const std::vector<float> WHITE_QUEEN = {0, 0, 1, 0, 0};
+        static const std::vector<float> BLACK = {0, 0, 0, 1, 0};
+        static const std::vector<float> BLACK_QUEEN = {0, 0, 0, 0, 1};
+
         const auto& board = state->GetBoard();
         std::vector<std::vector<float>> input;
-        input.reserve(board.size());
-        for (int pieceId : board) {
+        input.reserve(board.size() / 2);
+        for (auto [i, pieceId] : Enumerate(board)) {
             if (pieceId != -2) {
                 if (pieceId == -1) {
-                    input.push_back({1, 0, 0});
+                    input.push_back(FREE);
                 } else if (state->IsWhite(pieceId)) {
-                    input.push_back({0, 1, 0});
+                    if (state->IsQueen(pieceId)) {
+                        input.push_back(WHITE_QUEEN);
+                    } else {
+                        input.push_back(WHITE);
+                    }
                 } else {
-                    input.push_back({0, 0, 1});
+                    if (state->IsQueen(pieceId)) {
+                        input.push_back(BLACK_QUEEN);
+                    } else {
+                        input.push_back(BLACK);
+                    }
                 }
-            } else {
-                input.push_back({0, 0, 0});
             }
         }
 
@@ -795,17 +819,34 @@ private:
             if (pieceId >= 0 && !state->IsEnemy(from->cellId)) {
                 LeavesTraverse(from, path, [&]() {
                     if (path.size() > 1) {
-                        auto ind = state->IsWhite(board[path.front()]) ? 1 : 2;
                         auto after = input;
-                        after[path.front()][ind] = 0;
-                        after[path.front()][0] = 1;
-                        after[path.back()][ind] = 1;
-                        after[path.back()][0] = 0;
-
+                        after[path.front() / 2] = FREE;
                         for (size_t i = 1; i + 1 < path.size(); i += 2) {
-                            after[path[i]][3 - ind] = 0;
-                            after[path[i]][0] = 1;
+                            after[path[i] / 2] = FREE;
                         }
+                        bool isQueen = state->IsQueen(pieceId);
+                        if (!isQueen) {
+                            for (int cellId : path) {
+                                if (state->IsLastLine(cellId)) {
+                                    isQueen = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (state->IsWhite(pieceId)) {
+                            if (isQueen) {
+                                after[path.back() / 2] = WHITE_QUEEN;
+                            } else {
+                                after[path.back() / 2] = WHITE;
+                            }
+                        } else {
+                            if (isQueen) {
+                                after[path.back() / 2] = BLACK_QUEEN;
+                            } else {
+                                after[path.back() / 2] = BLACK;
+                            }
+                        }
+
                         auto matrix = CreateMatrixFromData(after);
                         nn_->AdjustShape(matrix);
                         float prob = nn_->Forward(matrix)[0];
@@ -888,7 +929,7 @@ auto BuildNeuralNetwork() {
     auto nn = std::make_shared<Sequential>();
     (*nn)
         .AddModule(Flatten())
-        .AddModule(Linear(64, 32))
+        .AddModule(Linear(INPUT_DIM * INPUT_ROWS, 32))
         .AddModule(ReLU())
         .AddModule(Linear(32, 16))
         .AddModule(ReLU())
@@ -941,15 +982,12 @@ public:
                     auto secondInd = (firstInd + diff) % numBots_;
                     auto& first = whiteBots_[firstInd];
                     auto& second = blackBots_[secondInd];
-//                    sf::RenderWindow window(sf::VideoMode(640, 640), std::to_string(first) + " " + std::to_string(first + diff));
-//                    BoardRenderer renderer(window);
 
                     std::stringstream ss;
                     ss << "Game" << gameInd.fetch_add(1);
                     auto filename = ss.str();
-                    std::ofstream file(filename);
+                    thread_local std::ofstream file(filename);
                     Log() = Logger(std::move(filename), file);
-//                    Log() = Logger(filename);
 
                     EmptyRenderer renderer;
                     GameManager game(8, 8, renderer);
